@@ -2,14 +2,17 @@ import { NextAuthOptions } from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
-import { compare } from "bcryptjs";
-import prisma from '@/app/lib/prisma';
+import { compare } from "bcrypt";
+import { prisma } from "@/app/lib/prisma";
+import { JWT } from "next-auth/jwt";
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
   session: {
     strategy: "jwt",
   },
+  secret: process.env.NEXTAUTH_SECRET,
+  debug: process.env.NODE_ENV === "development",
   pages: {
     signIn: '/login',
   },
@@ -26,7 +29,7 @@ export const authOptions: NextAuthOptions = {
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) {
-          return null;
+          throw new Error("Invalid credentials");
         }
 
         const user = await prisma.user.findUnique({
@@ -35,30 +38,25 @@ export const authOptions: NextAuthOptions = {
           }
         });
 
-        if (!user || !user.password) {
-          return null;
+        if (!user || !user?.password) {
+          throw new Error("Invalid credentials");
         }
 
-        const isPasswordValid = await compare(
+        const isCorrectPassword = await compare(
           credentials.password,
           user.password
         );
 
-        if (!isPasswordValid) {
-          return null;
+        if (!isCorrectPassword) {
+          throw new Error("Invalid credentials");
         }
 
-        return {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          image: user.image,
-        };
+        return user;
       }
     })
   ],
   callbacks: {
-    async session({ token, session }) {
+    async session({ session, token }) {
       if (token) {
         session.user.id = token.id;
         session.user.name = token.name;
@@ -67,25 +65,39 @@ export const authOptions: NextAuthOptions = {
       }
       return session;
     },
-    async jwt({ token, user }) {
-      if (user) {
-        token.id = user.id;
-      }
-
+    async jwt({ token, user }): Promise<JWT> {
       const dbUser = await prisma.user.findFirst({
         where: {
           email: token.email,
         },
       });
 
-      if (dbUser) {
-        token.id = dbUser.id;
-        token.name = dbUser.name;
-        token.email = dbUser.email || token.email;
-        token.picture = dbUser.image;
+      if (!dbUser) {
+        if (user) {
+          return {
+            ...token,
+            id: user.id,
+            name: user.name || null,
+            email: user.email || "",
+            picture: user.image || null,
+          };
+        }
+        return {
+          ...token,
+          id: token.sub || "",
+          name: token.name || null,
+          email: token.email || "",
+          picture: token.picture || null,
+        };
       }
 
-      return token;
+      return {
+        ...token,
+        id: dbUser.id,
+        name: dbUser.name || null,
+        email: dbUser.email || "",
+        picture: dbUser.image || null,
+      };
     },
   },
 }; 
