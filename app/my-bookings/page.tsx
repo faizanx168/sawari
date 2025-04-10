@@ -16,6 +16,8 @@ import {
   SelectTrigger,  
   SelectValue,
 } from "../components/ui/select";
+import { useQuery } from '@tanstack/react-query';
+import { toast } from 'sonner';
 
 
 interface Booking {
@@ -66,9 +68,6 @@ type SortOrder = 'asc' | 'desc';
 export default function MyBookings() {
   const { status } = useSession();
   const router = useRouter();
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState({
     status: 'all',
@@ -85,47 +84,49 @@ export default function MyBookings() {
     reviewedName: string;
   } | null>(null);
 
-  useEffect(() => {
-    if (status === 'unauthenticated') {
-      router.push('/login');
-      return;
-    }
-
-    if (status === 'authenticated') {
-      fetchBookings();
-    }
-  }, [status, router]);
-
-  const fetchBookings = async () => {
-    try {
+  // Use React Query for fetching bookings
+  const { data: bookings = [], isLoading, refetch: refetchBookings } = useQuery({
+    queryKey: ['bookings'],
+    queryFn: async () => {
       const response = await fetch('/api/bookings/my-bookings');
       if (!response.ok) {
         throw new Error('Failed to fetch bookings');
       }
-      const data = await response.json();
-      setBookings(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setIsLoading(false);
+      return response.json();
+    },
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false,
+    enabled: status === 'authenticated', // Only fetch when authenticated
+  });
+
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      router.push('/login');
     }
-  };
+  }, [status, router]);
 
   const handleDeleteBooking = async (bookingId: string) => {
     try {
       setIsDeletingBooking(true);
+      setBookingToDelete(bookingId);
+      
       const response = await fetch(`/api/bookings/${bookingId}`, {
         method: 'DELETE',
       });
+      
       if (!response.ok) {
-        throw new Error('Failed to delete booking');
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete booking');
       }
-      await fetchBookings();
-      setBookingToDelete(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      
+      toast.success('Booking deleted successfully');
+      refetchBookings();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to delete booking');
+      console.error('Error deleting booking:', error);
     } finally {
       setIsDeletingBooking(false);
+      setBookingToDelete(null);
     }
   };
 
@@ -137,7 +138,7 @@ export default function MyBookings() {
   const handleReviewSuccess = () => {
     setShowReviewForm(false);
     setSelectedBooking(null);
-    fetchBookings();
+    refetchBookings();
   };
 
   const getStatusIcon = (status: string) => {
@@ -171,7 +172,7 @@ export default function MyBookings() {
   };
 
   const filteredAndSortedBookings = bookings
-    .filter(booking => {
+    .filter((booking: Booking) => {
       if (filters.status !== 'all' && booking.status !== filters.status) {
         return false;
       }
@@ -194,15 +195,17 @@ export default function MyBookings() {
           return true;
       }
     })
-    .sort((a, b) => {
-      let comparison = 0;
-      switch (sortField) {
-        case 'date':
-        case 'createdAt':
-          comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-          break;
+    .sort((a: Booking, b: Booking) => {
+      if (sortField === 'date') {
+        return sortOrder === 'asc' 
+          ? new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      } else if (sortField === 'createdAt') {
+        return sortOrder === 'asc'
+          ? a.createdAt.localeCompare(b.createdAt)
+          : b.createdAt.localeCompare(a.createdAt);
       }
-      return sortOrder === 'asc' ? comparison : -comparison;
+      return 0;
     });
 
   if (isLoading) {
@@ -215,13 +218,13 @@ export default function MyBookings() {
     );
   }
 
-  if (error) {
+  if (bookings.length === 0) {
     return (
       <>
             <div className="container mx-auto px-4 py-8">
           <Breadcrumb items={[{ label: 'My Bookings', href: '/my-bookings' }]} />
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-            {error}
+          <div className="text-center py-8">
+            <p className="text-gray-500">No bookings found matching your criteria.</p>
           </div>
         </div>
       </>
@@ -310,7 +313,7 @@ export default function MyBookings() {
           </div>
         ) : (
           <div className="space-y-4">
-            {filteredAndSortedBookings.map((booking) => (
+            {filteredAndSortedBookings.map((booking: Booking) => (
               <div key={booking.id} className="bg-white rounded-lg shadow-md p-6">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center space-x-2">
@@ -318,7 +321,7 @@ export default function MyBookings() {
                     <span className="font-semibold">{getStatusText(booking.status)}</span>
                   </div>
                   <span className="text-sm text-gray-500">
-                    {new Date(booking.ride.date).toLocaleDateString('en-US', {
+                    {new Date(booking.createdAt).toLocaleDateString('en-US', {
                       month: 'numeric',
                       day: 'numeric',
                       year: 'numeric'
@@ -401,7 +404,7 @@ export default function MyBookings() {
                           >
                             Review Driver
                           </Button>
-                          {booking.ride.bookings.map((otherBooking) => (
+                          {booking.ride.bookings.map((otherBooking: { user: { id: string; name: string } }) => (
                             <Button
                               key={otherBooking.user.id}
                               variant="outline"

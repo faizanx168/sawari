@@ -10,6 +10,7 @@ import { Label } from '../components/ui/label';
 import { toast } from 'sonner';
 import Image from 'next/image';
 import ConfirmationDialog from '../components/ConfirmationDialog';
+import { useQuery } from '@tanstack/react-query';
   
 interface Car {
   id: string;
@@ -25,7 +26,6 @@ interface Car {
 export default function MyCars() {
   const router = useRouter();
   const { data: session } = useSession();
-  const [cars, setCars] = useState<Car[]>([]);
   const [isAddingCar, setIsAddingCar] = useState(false);
   const [isDeletingCar, setIsDeletingCar] = useState<string | null>(null);
   const [carToDelete, setCarToDelete] = useState<string | null>(null);
@@ -38,27 +38,22 @@ export default function MyCars() {
     seats: '',
   });
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // Placeholder image for when car images fail to load
   const placeholderImage = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25' viewBox='0 0 800 600'%3E%3Crect fill='%23f3f4f6' width='800' height='600'/%3E%3Ctext fill='%239ca3af' font-family='sans-serif' font-size='24' x='50%25' y='50%25' text-anchor='middle' dominant-baseline='middle'%3ECar Image%3C/text%3E%3C/svg%3E";
 
-  useEffect(() => {
-    fetchCars();
-  }, []);
-
-  const fetchCars = async () => {
-    try {
+  // Use React Query for fetching cars
+  const { data: cars = [], isLoading, refetch: refetchCars } = useQuery({
+    queryKey: ['cars'],
+    queryFn: async () => {
       const response = await fetch('/api/cars');
       if (!response.ok) throw new Error('Failed to fetch cars');
-      const data = await response.json();
-      setCars(data);
-    } catch (error) {
-      toast.error('Failed to load cars');
-      console.error('Error fetching cars:', error);
-    }
-  };
+      return response.json();
+    },
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false,
+  });
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -142,67 +137,16 @@ export default function MyCars() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleAddCar = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
-    setError(null);
-
     try {
-      // Validate file types and sizes before uploading
-      for (const file of selectedImages) {
-        if (!file.type.startsWith('image/')) {
-          throw new Error(`File "${file.name}" is not an image`);
-        }
-        // 5MB limit
-        if (file.size > 5 * 1024 * 1024) {
-          throw new Error(`File "${file.name}" exceeds 5MB size limit`);
-        }
-      }
-
-      const response = await fetch('/api/cars', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...newCar,
-          year: parseInt(newCar.year),
-          seats: parseInt(newCar.seats),
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to create car');
-      }
-
-      const car = await response.json();
-
-      if (selectedImages.length > 0) {
-        try {
-          await uploadImages(car.id);
-        } catch (uploadError) {
-          // If image upload fails, we'll show the error but keep the car
-          toast.error(uploadError instanceof Error ? uploadError.message : 'Failed to upload images');
-          console.error('Error uploading images:', uploadError);
-        }
-      }
-
-      toast.success('Car added successfully');
-      setIsAddingCar(false);
-      setNewCar({
-        make: '',
-        model: '',
-        year: '',
-        color: '',
-        licensePlate: '',
-        seats: '',
-      });
+      const formData = new FormData();
+      // ... existing code ...
       setSelectedImages([]);
-      fetchCars();
+      refetchCars();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to add car');
       console.error('Error adding car:', error);
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -214,7 +158,7 @@ export default function MyCars() {
 
       if (!response.ok) throw new Error('Failed to delete image');
       toast.success('Image deleted successfully');
-      fetchCars();
+      refetchCars();
     } catch (error) {
       toast.error('Failed to delete image');
       console.error('Error deleting image:', error);
@@ -234,7 +178,7 @@ export default function MyCars() {
       }
 
       toast.success('Car deleted successfully');
-      fetchCars();
+      refetchCars();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to delete car');
       console.error('Error deleting car:', error);
@@ -255,7 +199,7 @@ export default function MyCars() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg p-6 max-w-md w-full">
             <h2 className="text-xl font-bold mb-4">Add New Car</h2>
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleAddCar} className="space-y-4">
               <div>
                 <Label htmlFor="make">Make</Label>
                 <Input
@@ -340,8 +284,8 @@ export default function MyCars() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {cars.map((car) => (
-          <div key={car.id} className="border rounded-lg p-4">
+        {cars.map((car: Car) => (
+          <div key={car.id} className="bg-white rounded-lg shadow-md overflow-hidden">
             <div className="aspect-video relative mb-4">
               {car.images && car.images.length > 0 && car.images[0] ? (
                 <Image
@@ -362,35 +306,32 @@ export default function MyCars() {
             <p className="text-gray-600">Color: {car.color}</p>
             <p className="text-gray-600">License Plate: {car.licensePlate}</p>
             <p className="text-gray-600">Seats: {car.seats}</p>
-            {car.images && car.images.length > 0 && (
-              <div className="mt-4">
-                <h4 className="font-medium mb-2">Images</h4>
-                <div className="grid grid-cols-2 gap-2">
-                  {car.images.map((image) => (
-                    <div key={image.id} className="relative aspect-video">
-                      <Image
-                        src={image.url}
-                        alt="Car"
-                        fill
-                        className="object-cover rounded-md"
-                        onError={(e) => {
-                          console.error('Error loading image:', e);
-                          // Fallback to a placeholder if image fails to load
-                          const target = e.target as HTMLImageElement;
-                          target.src = placeholderImage;
-                        }}
-                      />
-                      <button
-                        onClick={() => handleDeleteImage(car.id, image.id)}
-                        className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
+            <div className="p-4">
+              <div className="flex flex-wrap gap-2 mb-4">
+                {car.images?.map((image: { id: string; url: string }) => (
+                  <div key={image.id} className="relative w-24 h-24">
+                    <Image
+                      src={image.url}
+                      alt="Car"
+                      fill
+                      className="object-cover rounded-md"
+                      onError={(e) => {
+                        console.error('Error loading image:', e);
+                        // Fallback to a placeholder if image fails to load
+                        const target = e.target as HTMLImageElement;
+                        target.src = placeholderImage;
+                      }}
+                    />
+                    <button
+                      onClick={() => handleDeleteImage(car.id, image.id)}
+                      className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
             <div className="mt-4 flex justify-end">
               <Button
                 variant="outline"

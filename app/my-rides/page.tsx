@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Calendar, Clock, MapPin, Users, DollarSign, Repeat, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
 import { toast } from 'sonner';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { useQuery } from '@tanstack/react-query';
 
 interface Ride {
   id: string;
@@ -32,16 +33,24 @@ interface Ride {
 export default function MyRides() {
   const { status } = useSession();
   const router = useRouter();
-  const [rides, setRides] = useState<Ride[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (status === 'authenticated') {
-      fetchRides();
-    }
-  }, [status]);
+  // Use React Query for fetching rides
+  const { data: rides = [], isLoading, refetch: refetchRides } = useQuery({
+    queryKey: ['rides'],
+    queryFn: async () => {
+      const response = await fetch('/api/rides/my-rides');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to fetch rides');
+      }
+      return response.json();
+    },
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false,
+    enabled: status === 'authenticated', // Only fetch when authenticated
+  });
 
   useEffect(() => {
     if (status === 'unauthenticated') {
@@ -49,27 +58,29 @@ export default function MyRides() {
     }
   }, [status, router]);
 
-  const fetchRides = async () => {
+  const handleStatusChange = async (rideId: string, newStatus: string) => {
     try {
-      setLoading(true);
-      setError(null);
-      console.log('Fetching rides...');
-      const response = await fetch('/api/rides/my-rides');
-      
+      setUpdatingStatus(rideId);
+      const response = await fetch(`/api/rides/${rideId}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
       if (!response.ok) {
         const errorData = await response.json();
-        console.error('Error response:', errorData);
-        throw new Error(errorData.error || 'Failed to fetch rides');
+        throw new Error(errorData.error || 'Failed to update ride status');
       }
-      
-      const data = await response.json();
-      console.log('Received rides data:', data);
-      setRides(data);
+
+      toast.success('Ride status updated successfully');
+      refetchRides();
     } catch (error) {
-      console.error('Error fetching rides:', error);
-      setError(error instanceof Error ? error.message : 'Failed to load rides');
+      toast.error(error instanceof Error ? error.message : 'Failed to update ride status');
+      console.error('Error updating ride status:', error);
     } finally {
-      setLoading(false);
+      setUpdatingStatus(null);
     }
   };
 
@@ -88,46 +99,12 @@ export default function MyRides() {
         throw new Error(errorData.error || 'Failed to delete ride');
       }
 
-      setRides(rides.filter(ride => ride.id !== rideId));
+      refetchRides();
       toast.success('Ride deleted successfully');
     } catch (error) {
       console.error('Error deleting ride:', error);
       setError(error instanceof Error ? error.message : 'Failed to delete ride');
       toast.error('Failed to delete ride');
-    }
-  };
-
-  const handleToggleStatus = async (rideId: string, currentStatus: string) => {
-    try {
-      setUpdatingStatus(rideId);
-      const newStatus = currentStatus === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
-      
-      const response = await fetch(`/api/rides/${rideId}/status`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ status: newStatus }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to update ride status');
-      }
-
-      const updatedRide = await response.json();
-      
-      // Update the rides state with the updated ride
-      setRides(rides.map(ride => 
-        ride.id === rideId ? { ...ride, status: updatedRide.status } : ride
-      ));
-      
-      toast.success(`Ride ${newStatus === 'ACTIVE' ? 'activated' : 'paused'} successfully`);
-    } catch (error) {
-      console.error('Error updating ride status:', error);
-      toast.error('Failed to update ride status');
-    } finally {
-      setUpdatingStatus(null);
     }
   };
 
@@ -153,7 +130,7 @@ export default function MyRides() {
     return days.map(day => dayLabels[day] || day).join(', ');
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">
@@ -195,7 +172,7 @@ export default function MyRides() {
             </div>
           ) : (
             <div className="space-y-6">
-              {rides.map((ride) => (
+              {rides.map((ride: Ride) => (
                 <div
                   key={ride.id}
                   className="bg-white shadow rounded-lg p-6 hover:shadow-md transition-shadow"
@@ -259,7 +236,7 @@ export default function MyRides() {
 
                     <div className="flex space-x-2">
                       <button
-                        onClick={() => handleToggleStatus(ride.id, ride.status)}
+                        onClick={() => handleStatusChange(ride.id, ride.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE')}
                         className={`text-gray-600 hover:text-gray-800 ${updatingStatus === ride.id ? 'opacity-50 cursor-not-allowed' : ''}`}
                         title={ride.status === 'ACTIVE' ? 'Pause ride' : 'Activate ride'}
                         disabled={updatingStatus === ride.id}

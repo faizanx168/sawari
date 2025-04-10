@@ -1,14 +1,17 @@
 'use client';
 
-import { useState, useEffect, use, useCallback, useMemo } from 'react';
+import { useState, useEffect, use, useMemo, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 import { Button } from '../../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
-import { Star, StarHalf } from 'lucide-react';
+import { Star, StarHalf, Camera, Phone } from 'lucide-react';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import React from 'react';
+import { toast } from 'sonner';
+import { useQuery } from '@tanstack/react-query';
+import Link from 'next/link';
 
 interface Review {
   id: string;
@@ -35,46 +38,34 @@ interface User {
 
 export default function UserProfile({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
-  const { data: session, status } = useSession();
+  const { data: session } = useSession();
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('about');
   const [showAddReview, setShowAddReview] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchUserProfile = useCallback(async () => {
-    try {
-      console.log('Fetching user profile for ID:', resolvedParams.id);
+  const { data: userData, error: queryError, isLoading, refetch } = useQuery({
+    queryKey: ['user', resolvedParams.id],
+    queryFn: async () => {
       const response = await fetch(`/api/users/${resolvedParams.id}`);
-      
       if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Error response:', errorData);
-        throw new Error(errorData.error || 'Failed to fetch user profile');
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to fetch user');
       }
-      
-      const data = await response.json();
-      console.log('User profile data:', data);
-      setUser(data);
-      setError(null);
-    } catch (error) {
-      console.error('Error fetching user profile:', error);
-      setError(error instanceof Error ? error.message : 'An unknown error occurred');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [resolvedParams.id]);
+      return response.json();
+    },
+    enabled: !!resolvedParams.id,
+  });
 
   useEffect(() => {
-    console.log('Session status:', status);
-    console.log('Session data:', session);
-    
-    if (status === 'loading') {
-      return; // Wait for session to load
+    if (userData) {
+      setUser(userData);
+      setPhoneNumber(userData.phoneNumber || '');
     }
-    
-    fetchUserProfile();
-  }, [fetchUserProfile, status, session]);
+  }, [userData]);
 
   const averageRating = useMemo(() => {
     if (!user?.reviewsReceived) return 0;
@@ -104,26 +95,105 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
     return stars;
   }, [averageRating]);
 
-  if (isLoading) {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please upload an image file');
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Image size should be less than 5MB');
+      return;
+    }
+
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error('Failed to upload image');
+
+      const data = await response.json();
+      
+      // Update user profile with new image URL
+      const updateResponse = await fetch(`/api/users/${user?.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: data.url }),
+      });
+
+      if (!updateResponse.ok) throw new Error('Failed to update profile');
+
+      const updatedUser = await updateResponse.json();
+      setUser(updatedUser);
+      toast.success('Profile picture updated successfully');
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      toast.error('Failed to update profile picture');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handlePhoneNumberUpdate = async () => {
+    if (!user) return;
+
+    try {
+      const response = await fetch(`/api/users/${user.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber }),
+      });
+
+      if (!response.ok) throw new Error('Failed to update phone number');
+
+      const updatedUser = await response.json();
+      setUser(updatedUser);
+      setIsEditing(false);
+      toast.success('Phone number updated successfully');
+    } catch (error) {
+      console.error('Error updating phone number:', error);
+      toast.error('Failed to update phone number');
+    }
+  };
+
+  if (queryError) {
     return (
-      <div className="container mx-auto px-4 py-8">
-        <LoadingSpinner fullScreen text="Loading profile..." />
+      <div className="min-h-screen bg-gray-100 py-12">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="text-center">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">Access Denied</h2>
+              <p className="text-gray-600 mb-4">
+                {queryError instanceof Error ? queryError.message : 'You cannot view this profile'}
+              </p>
+              <Link
+                href="/"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                Return Home
+              </Link>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
-  if (error) {
+  if (isLoading) {
     return (
       <div className="container mx-auto px-4 py-8">
-        <Card>
-          <CardHeader>
-            <CardTitle>Error</CardTitle>
-            <CardDescription>{error}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={fetchUserProfile}>Try Again</Button>
-          </CardContent>
-        </Card>
+        <LoadingSpinner fullScreen text="Loading profile..." />
       </div>
     );
   }
@@ -137,17 +207,37 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
         <div className="container mx-auto px-4 py-8">
       <Card>
         <CardHeader className="flex flex-row items-center gap-4">
-          <Avatar className="h-20 w-20">
-            <AvatarImage src={user.image} alt={user.name} />
-            <AvatarFallback>{user.name?.charAt(0)}</AvatarFallback>
-          </Avatar>
+          <div className="relative">
+            <Avatar className="h-20 w-20">
+              <AvatarImage src={user.image} alt={user.name} />
+              <AvatarFallback>{user.name?.charAt(0)}</AvatarFallback>
+            </Avatar>
+            {session?.user?.id === user.id && (
+              <>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  className="hidden"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="absolute bottom-0 right-0 p-1 bg-blue-600 text-white rounded-full hover:bg-blue-700"
+                  disabled={isUploading}
+                >
+                  <Camera className="h-4 w-4" />
+                </button>
+              </>
+            )}
+          </div>
           <div>
             <CardTitle>{user.name}</CardTitle>
             <CardDescription>Member since {new Date(user.createdAt).toLocaleDateString()}</CardDescription>
             <div className="flex items-center mt-2">
               {stars}
               <span className="ml-2 text-sm text-gray-600">
-                ({user.reviewsReceived.length} reviews)
+                ({user?.reviewsReceived?.length || 0} reviews)
               </span>
             </div>
           </div>
@@ -172,7 +262,50 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
                 <div>
                   <h3 className="font-semibold">Contact Information</h3>
                   <p>Email: {user.email}</p>
-                  <p>Phone: {user.phoneNumber}</p>
+                  {session?.user?.id === user.id ? (
+                    <div className="mt-2">
+                      <div className="flex items-center gap-2">
+                        <Phone className="h-4 w-4" />
+                        {isEditing ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="tel"
+                              value={phoneNumber}
+                              onChange={(e) => setPhoneNumber(e.target.value)}
+                              className="border rounded px-2 py-1"
+                              placeholder="Enter phone number"
+                            />
+                            <Button
+                              onClick={handlePhoneNumberUpdate}
+                            >
+                              Save
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                setIsEditing(false);
+                                setPhoneNumber(user?.phoneNumber || '');
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span>{user.phoneNumber || 'No phone number'}</span>
+                            <Button
+                              variant="outline"
+                              onClick={() => setIsEditing(true)}
+                            >
+                              Edit
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <p>Phone: {user.phoneNumber || 'Not provided'}</p>
+                  )}
                 </div>
               </div>
             </TabsContent>
@@ -200,7 +333,7 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
           onClose={() => setShowAddReview(false)}
           onSuccess={() => {
             setShowAddReview(false);
-            fetchUserProfile();
+            refetch();
           }}
         />
       )}

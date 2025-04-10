@@ -126,4 +126,61 @@ export const sendVerificationEmail = async (email: string) => {
     });
     throw new Error(`Failed to send verification email: ${smtpError.message}`);
   }
+};
+
+export const sendPasswordResetEmail = async (email: string, token: string) => {
+  try {
+    console.log('Starting password reset process for:', email);
+    
+    const resetUrl = `${process.env.NEXT_PUBLIC_APP_URL}/reset-password?token=${token}`;
+    
+    console.log('Generated reset URL:', resetUrl);
+
+    const mailOptions = {
+      from: `"Sawari" <${process.env.FROM}>`,
+      to: email,
+      subject: 'Reset your password',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #1a56db;">Reset Your Password</h1>
+          <p>You have requested to reset your password. Click the button below to set a new password:</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}" 
+               style="background-color: #1a56db; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+              Reset Password
+            </a>
+          </div>
+          <p style="color: #666; font-size: 14px;">This link will expire in 24 hours.</p>
+          <p style="color: #666; font-size: 14px;">If you didn't request a password reset, you can safely ignore this email.</p>
+        </div>
+      `,
+    };
+
+    console.log('Attempting to send password reset email with options:', {
+      from: mailOptions.from,
+      to: mailOptions.to,
+      subject: mailOptions.subject,
+    });
+
+    const info = await transport.sendMail(mailOptions);
+    console.log('Password reset email sent successfully:', {
+      messageId: info.messageId,
+      response: info.response,
+      accepted: info.accepted,
+      rejected: info.rejected,
+    });
+    return true;
+  } catch (error) {
+    const smtpError = error as SMTPError;
+    console.error('Detailed error sending password reset email:', {
+      name: smtpError.name,
+      message: smtpError.message,
+      code: smtpError.code,
+      command: smtpError.command,
+      response: smtpError.response,
+      responseCode: smtpError.responseCode,
+      stack: smtpError.stack
+    });
+    throw new Error(`Failed to send password reset email: ${smtpError.message}`);
+  }
 }; 

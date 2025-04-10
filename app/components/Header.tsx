@@ -211,9 +211,9 @@ export default function Header() {
                     className="flex items-center text-sm rounded-full focus:outline-none"
                   >
                     <Image
-                      className="h-8 w-8 rounded-full"
-                      src={session.user.image || '/default-avatar.png'}
-                      alt={session.user.name || 'User avatar'}
+                      className="h-8 w-8 rounded-full object-cover"
+                      src={session?.user?.image || '/default-avatar.svg'}
+                      alt={session?.user?.name || 'User avatar'}
                       width={32}
                       height={32}
                     />

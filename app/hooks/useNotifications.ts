@@ -25,8 +25,10 @@ export function useNotifications() {
   const { data: notifications = [], isLoading, error } = useQuery({
     queryKey: ['notifications'],
     queryFn: fetchNotifications,
-    staleTime: 30000, // 30 seconds
-    refetchInterval: 60000, // 1 minute
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    refetchInterval: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false, // Don't refetch when window regains focus
+    refetchOnMount: false, // Don't refetch on component mount if data is fresh
   });
 
   const unreadCount = notifications.filter(n => !n.read).length;
