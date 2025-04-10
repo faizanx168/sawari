@@ -29,12 +29,12 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            <div className="relative h-[400px] lg:h-[500px]">
-              <Image
+            <div className="relative h-[400px] lg:h-[500px] w-full overflow-hidden relative z-0">
+              <Image 
                 src="/images/carpool-illustration.svg"
                 alt="People carpooling together"
                 fill
-                className="object-contain"
+                className="object-contain relative z-0"
                 priority
               />
             </div>

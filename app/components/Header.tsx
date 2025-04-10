@@ -125,9 +125,16 @@ export default function Header() {
         <div className="flex justify-between h-16">
           {/* Logo and main navigation */}
           <div className="flex">
-            <div className="flex-shrink-0 flex items-center">
-              <Link href="/" className="text-2xl font-bold text-blue-600">
-                Sawari
+            <div className="flex-shrink-0 flex items-center relative z-0">
+              <Link href="/" className="flex items-center">
+                <Image
+                  src="/images/sawari.png"
+                  alt="Sawari Logo"
+                  width={150}
+                  height={50}
+                  className="h-12 w-auto"
+                  priority
+                />
               </Link>
             </div>
             <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
