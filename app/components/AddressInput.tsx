@@ -4,13 +4,15 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { MapPin } from 'lucide-react';
+import { loadGoogleMapsScript } from '../utils/googleMaps';
 
 interface AddressInputProps {
   value: string;
-  onChange: (address: string, location: { latitude: number; longitude: number }) => void;
+  onChange: (address: string, location: { latitude: number; longitude: number; address: string } | null) => void;
   placeholder?: string;
   required?: boolean;
   error?: string;
+  onFocus?: () => void;
 }
 
 declare global {
@@ -25,6 +27,7 @@ export default function AddressInput({
   placeholder = 'Enter address',
   required = false,
   error,
+  onFocus,
 }: AddressInputProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -36,50 +39,41 @@ export default function AddressInput({
   }, [value]);
 
   useEffect(() => {
-    if (!inputRef.current) return;
-
-    const initializeAutocomplete = () => {
-      if (!window.google?.maps?.places) return;
-
-      const autocomplete = new window.google.maps.places.Autocomplete(inputRef.current!, {
-        types: ['address'],
-        componentRestrictions: { country: 'us' },
-      });
-
-      autocomplete.addListener('place_changed', () => {
-        const place = autocomplete.getPlace();
-        if (place.geometry?.location) {
-          const address = place.formatted_address;
-          const location = {
-            latitude: place.geometry.location.lat(),
-            longitude: place.geometry.location.lng(),
-          };
-          setInputValue(address);
-          onChange(address, location);
-          setIsLoading(false);
+    const initAutocomplete = async () => {
+      if (!inputRef.current) return;
+      
+      try {
+        await loadGoogleMapsScript();
+        
+        // Check if places library is available
+        if (!window.google || !window.google.maps || !window.google.maps.places) {
+          console.error('Google Maps Places library not available');
+          return;
         }
-      });
-
-      setIsInitialized(true);
+        
+        const autocomplete = new window.google.maps.places.Autocomplete(inputRef.current, {
+          types: ['address'],
+          componentRestrictions: { country: 'us' },
+        });
+        
+        autocomplete.addListener('place_changed', () => {
+          const place = autocomplete.getPlace();
+          if (place.geometry) {
+            const location = {
+              latitude: place.geometry.location.lat(),
+              longitude: place.geometry.location.lng(),
+              address: place.formatted_address,
+            };
+            setInputValue(place.formatted_address);
+            onChange(place.formatted_address, location);
+          }
+        });
+      } catch (error) {
+        console.error('Error initializing Google Maps Autocomplete:', error);
+      }
     };
-
-    if (window.google?.maps?.places) {
-      initializeAutocomplete();
-    } else {
-      const script = document.createElement('script');
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}&libraries=places`;
-      script.async = true;
-      script.defer = true;
-      script.onload = initializeAutocomplete;
-      document.head.appendChild(script);
-
-      return () => {
-        const scriptElement = document.querySelector(`script[src="${script.src}"]`);
-        if (scriptElement) {
-          document.head.removeChild(scriptElement);
-        }
-      };
-    }
+    
+    initAutocomplete();
   }, [onChange]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -98,6 +92,7 @@ export default function AddressInput({
         placeholder={placeholder}
         value={inputValue}
         onChange={handleInputChange}
+        onFocus={onFocus}
         className={`pl-10 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 ${
           error ? 'border-red-500' : ''
         }`}

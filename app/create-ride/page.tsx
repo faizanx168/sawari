@@ -29,6 +29,7 @@ interface Location {
 interface GoogleLocation {
   latitude: number;
   longitude: number;
+  address?: string;
 }
 
 interface Car {
@@ -96,7 +97,9 @@ export default function CreateRide() {
     }
   };
 
-  const handleLocationChange = (address: string, location: GoogleLocation, type: 'pickup' | 'dropoff') => {
+  const handleLocationChange = (address: string, location: GoogleLocation | null, type: 'pickup' | 'dropoff') => {
+    if (!location) return;
+
     const newLocation: Location = {
       lat: location.latitude,
       lng: location.longitude,
@@ -130,8 +133,8 @@ export default function CreateRide() {
       const newRideSlot = {
         startTime: departureTime,
         endTime: returnTime || '23:59',
-        recurringPattern,
-        recurringDays: recurringPattern === 'WEEKLY' ? selectedDays : undefined,
+        recurringPattern: recurringPattern || 'DAILY',
+        recurringDays: selectedDays,
         startDate,
         endDate: endDate || undefined,
       };
@@ -139,9 +142,9 @@ export default function CreateRide() {
       const existingSlots = existingRides.map((ride: Ride) => ({
         startTime: ride.departureTime,
         endTime: ride.returnTime || '23:59',
-        recurringPattern: ride.recurringPattern,
+        recurringPattern: ride.recurringPattern || 'DAILY',
         recurringDays: ride.recurringDays,
-        startDate: ride.startDate,
+        startDate: ride.date,
         endDate: ride.endDate,
       }));
       
@@ -198,30 +201,28 @@ export default function CreateRide() {
 
       // Format the data according to the schema
       const rideData = {
+        driverId: session.user.id,
         carId: selectedCar.id,
         pickupLocation: {
-          address: pickupAddress,
           latitude: pickupLocation.lat,
-          longitude: pickupLocation.lng
+          longitude: pickupLocation.lng,
+          address: pickupAddress
         },
         dropoffLocation: {
-          address: dropoffAddress,
           latitude: dropoffLocation.lat,
-          longitude: dropoffLocation.lng
+          longitude: dropoffLocation.lng,
+          address: dropoffAddress
         },
         departureTime,
-        returnTime: returnTime || null,
+        returnTime: returnTime || undefined,
         pricePerSeat: parseFloat(pricePerSeat),
         seatsAvailable: parseInt(seatsAvailable),
         pickupRadius,
         dropoffRadius,
-        startDate,
-        endDate: endDate || null,
         recurringPattern,
         recurringDays: selectedDays,
-        recurringDates: null,
-        status: 'ACTIVE',
-        driverId: session.user.id
+        startDate,
+        endDate: endDate || undefined
       };
 
       console.log('Submitting ride data:', rideData);

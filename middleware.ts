@@ -10,9 +10,16 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN || '',
 });
 
-const ratelimit = new Ratelimit({
+// More permissive rate limit for API routes
+const apiRatelimit = new Ratelimit({
   redis,
-  limiter: Ratelimit.slidingWindow(10, '10 s'), // 10 requests per 10 seconds
+  limiter: Ratelimit.slidingWindow(200, '1 m'), // 200 requests per minute
+});
+
+// Stricter rate limit for other routes
+const pageRatelimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(50, '1 m'), // 50 requests per minute
 });
 
 // Helper function to get client IP
@@ -39,6 +46,18 @@ const authRoutes = [
   '/register'
 ];
 
+// API routes that need higher rate limits
+const apiRoutes = [
+  '/api/notifications',
+  '/api/rides',
+  '/api/bookings',
+  '/api/cars',
+  '/api/users',
+  '/api/reviews',
+  '/api/upload',
+  '/api/geocode'
+];
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -47,9 +66,22 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Apply rate limiting to all other routes
+  // Skip rate limiting in development
+  if (process.env.NODE_ENV === 'development') {
+    return NextResponse.next();
+  }
+
+  // Apply different rate limits based on route type
   const ip = getClientIp(request);
-  const { success, limit, reset, remaining } = await ratelimit.limit(ip);
+  let rateLimitResult;
+  
+  if (apiRoutes.some(route => pathname.startsWith(route))) {
+    rateLimitResult = await apiRatelimit.limit(ip);
+  } else {
+    rateLimitResult = await pageRatelimit.limit(ip);
+  }
+  
+  const { success, limit, reset, remaining } = rateLimitResult;
 
   // Add rate limit headers to response
   const response = NextResponse.next();

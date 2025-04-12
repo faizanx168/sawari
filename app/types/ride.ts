@@ -2,18 +2,19 @@ export type RecurringPattern = 'DAILY' | 'WEEKLY' | 'MONTHLY';
 
 export interface Ride {
   id: string;
-  startDate: string;
-  endDate?: string;
-  departureTime: string;
-  returnTime?: string;
+  date: string; // The date of the ride in YYYY-MM-DD format
+  departureTime: string; // The departure time in HH:MM format
+  returnTime?: string; // Optional return time for round trips
   pricePerSeat: number;
   seatsAvailable: number;
   status: 'PENDING' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
-  recurringPattern: RecurringPattern;
+  isRecurring: boolean;
+  recurringPattern?: RecurringPattern;
   recurringDays: string[];
-  recurringDates?: number[];
-  pickupRadius?: number;
-  dropoffRadius?: number;
+  startDate?: string;
+  endDate?: string;
+  pickupRadius?: number; // Radius in miles for pickup location
+  dropoffRadius?: number; // Radius in miles for dropoff location
   driver: {
     id: string;
     name: string | null;
@@ -40,7 +41,7 @@ export interface Ride {
     longitude: number;
   };
   distance?: {
-    pickup: number;
-    dropoff: number | null;
+    pickup: number; // Distance in miles from user's pickup to ride's pickup
+    dropoff: number | null; // Distance in miles from user's dropoff to ride's dropoff
   };
 } 

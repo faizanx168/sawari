@@ -44,50 +44,8 @@ export async function GET(
     if (currentUserId === id) {
       console.log('User viewing their own profile');
     } else {
-      // Check if users have ridden together
-      const haveRiddenTogether = await prisma.booking.findFirst({
-        where: {
-          OR: [
-            // Current user was a passenger and target user was the driver
-            {
-              userId: currentUserId,
-              ride: {
-                driverId: id,
-                status: 'COMPLETED'
-              }
-            },
-            // Target user was a passenger and current user was the driver
-            {
-              userId: id,
-              ride: {
-                driverId: currentUserId,
-                status: 'COMPLETED'
-              }
-            },
-            // Both users were passengers on the same ride
-            {
-              userId: currentUserId,
-              ride: {
-                bookings: {
-                  some: {
-                    userId: id,
-                    status: 'COMPLETED'
-                  }
-                },
-                status: 'COMPLETED'
-              }
-            }
-          ]
-        }
-      });
-
-      if (!haveRiddenTogether) {
-        console.log('Users have not ridden together');
-        return NextResponse.json(
-          { error: 'You can only view profiles of users you have ridden with' },
-          { status: 403 }
-        );
-      }
+      // Remove the restriction that checks if users have ridden together
+      console.log('User viewing another profile');
     }
 
     console.log('User profile fetched successfully');

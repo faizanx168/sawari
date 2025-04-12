@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader } from '@googlemaps/js-api-loader';
 import { Ride } from '../types/ride';
 import { Location } from '../types/location';
+import { loadGoogleMaps } from '../utils/googleMaps';
 
 interface RideMapProps {
   rides: Ride[];
@@ -18,13 +18,14 @@ interface RideMapProps {
 export default function RideMap({
   rides,
   fromLocation,
+  toLocation,
   selectedRideId,
   selectedRoute,
   onRideSelect,
   maxDistance
 }: RideMapProps) {
   const mapRef = useRef<google.maps.Map | null>(null);
-  const markersRef = useRef<google.maps.Marker[]>([]);
+  const markersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
   const circleRef = useRef<google.maps.Circle | null>(null);
   const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
@@ -34,18 +35,14 @@ export default function RideMap({
   useEffect(() => {
     if (!mapLoaded && mapDivRef.current) {
       const initMap = async () => {
-        const loader = new Loader({
-          apiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!,
-          version: 'weekly',
-          libraries: ['places']
-        });
-
         try {
-          await loader.load();
+          await loadGoogleMaps();
+          
           const defaultCenter = { lat: 40.7128, lng: -74.0060 }; // New York City
           mapRef.current = new google.maps.Map(mapDivRef.current!, {
             center: defaultCenter,
             zoom: 12,
+            mapId: process.env.NEXT_PUBLIC_GOOGLE_MAPS_ID,
             styles: [
               {
                 featureType: 'poi',
@@ -68,11 +65,17 @@ export default function RideMap({
   useEffect(() => {
     if (!mapRef.current || !mapLoaded) return;
 
-    // Clear existing directionsRenderer
+    // Clear existing directionsRenderer and markers
     if (directionsRenderer) {
       directionsRenderer.setMap(null);
       setDirectionsRenderer(null);
     }
+    markersRef.current.forEach(marker => {
+      if (marker.map) {
+        marker.map = null;
+      }
+    });
+    markersRef.current = [];
 
     if (selectedRoute) {
       // Create new directionsRenderer
@@ -101,31 +104,15 @@ export default function RideMap({
             renderer.setDirections(result);
             
             // Add markers for origin and destination
-            const originMarker = new google.maps.Marker({
-              position: { lat: selectedRoute.origin.latitude, lng: selectedRoute.origin.longitude },
+            const originMarker = new google.maps.marker.AdvancedMarkerElement({
               map: mapRef.current!,
-              icon: {
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 12,
-                fillColor: '#2563eb',
-                fillOpacity: 0.9,
-                strokeColor: 'white',
-                strokeWeight: 2,
-              },
+              position: { lat: selectedRoute.origin.latitude, lng: selectedRoute.origin.longitude },
               title: 'Pickup Location'
             });
 
-            const destinationMarker = new google.maps.Marker({
-              position: { lat: selectedRoute.destination.latitude, lng: selectedRoute.destination.longitude },
+            const destinationMarker = new google.maps.marker.AdvancedMarkerElement({
               map: mapRef.current!,
-              icon: {
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 12,
-                fillColor: '#dc2626',
-                fillOpacity: 0.9,
-                strokeColor: 'white',
-                strokeWeight: 2,
-              },
+              position: { lat: selectedRoute.destination.latitude, lng: selectedRoute.destination.longitude },
               title: 'Dropoff Location'
             });
 
@@ -144,24 +131,32 @@ export default function RideMap({
         }
       );
     } else {
-      // Reset markers and show all rides
-      markersRef.current.forEach(marker => marker.setMap(null));
-      markersRef.current = [];
+      // Show search location markers if provided
+      if (fromLocation) {
+        const pickupMarker = new google.maps.marker.AdvancedMarkerElement({
+          map: mapRef.current,
+          position: { lat: fromLocation.latitude, lng: fromLocation.longitude },
+          title: 'Your Pickup Location'
+        });
+        markersRef.current.push(pickupMarker);
+      }
 
+      if (toLocation) {
+        const dropoffMarker = new google.maps.marker.AdvancedMarkerElement({
+          map: mapRef.current,
+          position: { lat: toLocation.latitude, lng: toLocation.longitude },
+          title: 'Your Dropoff Location'
+        });
+        markersRef.current.push(dropoffMarker);
+      }
+
+      // Show all available rides
       rides.forEach(ride => {
-        const marker = new google.maps.Marker({
+        const marker = new google.maps.marker.AdvancedMarkerElement({
+          map: mapRef.current,
           position: {
             lat: ride.pickupLocation.latitude,
             lng: ride.pickupLocation.longitude
-          },
-          map: mapRef.current,
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            scale: selectedRideId === ride.id ? 12 : 10,
-            fillColor: selectedRideId === ride.id ? '#2563eb' : '#60a5fa',
-            fillOpacity: 0.9,
-            strokeColor: 'white',
-            strokeWeight: 2,
           },
           title: `$${ride.pricePerSeat} - ${ride.seatsAvailable} seats`
         });
@@ -191,19 +186,36 @@ export default function RideMap({
         markersRef.current.push(marker);
       });
 
-      // Reset map view if fromLocation exists
-      if (fromLocation) {
+      // Fit bounds to show all markers if both locations are provided
+      if (fromLocation && toLocation) {
+        const bounds = new google.maps.LatLngBounds();
+        bounds.extend({ lat: fromLocation.latitude, lng: fromLocation.longitude });
+        bounds.extend({ lat: toLocation.latitude, lng: toLocation.longitude });
+        mapRef.current?.fitBounds(bounds);
+        // Add some padding by adjusting the zoom level slightly
+        if (mapRef.current?.getZoom()) {
+          mapRef.current.setZoom(mapRef.current.getZoom()! - 1);
+        }
+      } else if (fromLocation) {
+        // Center on pickup location if only pickup is provided
         mapRef.current.setCenter({ lat: fromLocation.latitude, lng: fromLocation.longitude });
         mapRef.current.setZoom(12);
       }
     }
 
     return () => {
-      directionsRenderer?.setMap(null);
-      markersRef.current.forEach(marker => marker.setMap(null));
+      // Cleanup markers and directions renderer
+      markersRef.current.forEach(marker => {
+        if (marker.map) {
+          marker.map = null;
+        }
+      });
       markersRef.current = [];
+      if (directionsRenderer) {
+        directionsRenderer.setMap(null);
+      }
     };
-  }, [selectedRoute, mapLoaded, rides, selectedRideId, onRideSelect, fromLocation, directionsRenderer]);
+  }, [mapLoaded, selectedRoute, rides, selectedRideId, fromLocation, toLocation, directionsRenderer, onRideSelect]);
 
   // Update search radius circle
   useEffect(() => {
@@ -225,5 +237,9 @@ export default function RideMap({
     });
   }, [fromLocation, maxDistance, mapLoaded]);
 
-  return <div ref={mapDivRef} id="map" className="w-full h-full rounded-lg" />;
+  return (
+    <div className="w-full h-[500px] relative">
+      <div ref={mapDivRef} className="w-full h-full absolute" />
+    </div>
+  );
 } 

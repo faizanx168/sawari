@@ -46,6 +46,7 @@ export async function GET(request: Request) {
     const toLat = searchParams.get('toLat')
     const toLng = searchParams.get('toLng')
     const maxDistance = parseFloat(searchParams.get('maxDistance') || '30')
+    const departureDate = searchParams.get('departureDate')
 
     console.log('Search parameters:', {
       from,
@@ -55,7 +56,8 @@ export async function GET(request: Request) {
       fromLng,
       toLat,
       toLng,
-      maxDistance
+      maxDistance,
+      departureDate
     })
 
     // Validate input parameters
@@ -130,6 +132,39 @@ export async function GET(request: Request) {
       return NextResponse.json(rides)
     }
 
+    // Add date range conditions if departureDate is provided
+    if (departureDate) {
+      try {
+        const searchDate = new Date(departureDate);
+        
+        // Validate the date is not in the past
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        if (searchDate < today) {
+          return NextResponse.json(
+            { message: 'Search date cannot be in the past' },
+            { status: 400 }
+          );
+        }
+        
+        // Format the date as YYYY-MM-DD for consistent comparison
+        const formattedDate = searchDate.toISOString().split('T')[0];
+        
+        where.AND = [
+          {
+            date: formattedDate
+          }
+        ];
+      } catch (error) {
+        console.error('Error parsing date:', error);
+        return NextResponse.json(
+          { message: 'Invalid date format' },
+          { status: 400 }
+        );
+      }
+    }
+
     // Filter rides based on pickup location distance
     const filteredRides = rides.filter(ride => {
       if (!ride.pickupLocation || !ride.dropoffLocation) {
@@ -183,6 +218,179 @@ export async function GET(request: Request) {
     })
 
     console.log('Found rides after distance filtering:', filteredRides.length)
+
+    // Add distance information to each ride
+    const ridesWithDistance = filteredRides.map(ride => ({
+      ...ride,
+      distance: {
+        pickup: calculateDistanceSync(
+          fromCoords.latitude,
+          fromCoords.longitude,
+          ride.pickupLocation.latitude,
+          ride.pickupLocation.longitude
+        ) * 0.621371,
+        dropoff: toCoords ? calculateDistanceSync(
+          toCoords.latitude,
+          toCoords.longitude,
+          ride.dropoffLocation.latitude,
+          ride.dropoffLocation.longitude
+        ) * 0.621371 : null
+      }
+    }))
+
+    return NextResponse.json(ridesWithDistance)
+  } catch (error) {
+    console.error('Error searching rides:', error)
+    return NextResponse.json(
+      { message: 'Failed to search rides' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json()
+    const {
+      fromLat,
+      fromLng,
+      toLat,
+      toLng,
+      departureDate,
+      seats,
+      maxDistance = 30
+    } = body
+
+    // Validate input parameters
+    if (seats < 1) {
+      return NextResponse.json(
+        { message: 'Number of seats must be at least 1' },
+        { status: 400 }
+      )
+    }
+
+    if (maxDistance < 0 || maxDistance > 100) {
+      return NextResponse.json(
+        { message: 'Maximum distance must be between 0 and 100 miles' },
+        { status: 400 }
+      )
+    }
+
+    // Validate coordinates
+    const fromCoords = validateCoordinates(fromLat, fromLng)
+    const toCoords = validateCoordinates(toLat, toLng)
+
+    // Base query conditions
+    const where: Prisma.RideWhereInput = {
+      OR: [
+        { status: 'ACTIVE' },
+        { status: 'PENDING' }
+      ],
+      seatsAvailable: { gte: seats },
+    }
+
+    // Add date range conditions if departureDate is provided
+    if (departureDate) {
+      try {
+        const searchDate = new Date(departureDate)
+        
+        // Validate the date is not in the past
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        
+        if (searchDate < today) {
+          return NextResponse.json(
+            { message: 'Search date cannot be in the past' },
+            { status: 400 }
+          )
+        }
+        
+        // Format the date as YYYY-MM-DD for consistent comparison
+        const formattedDate = searchDate.toISOString().split('T')[0]
+        
+        where.AND = [
+          {
+            date: formattedDate
+          }
+        ]
+      } catch (error) {
+        console.error('Error parsing date:', error)
+        return NextResponse.json(
+          { message: 'Invalid date format' },
+          { status: 400 }
+        )
+      }
+    }
+
+    // Fetch rides with all necessary relations
+    const rides = await prisma.ride.findMany({
+      where,
+      include: {
+        pickupLocation: true,
+        dropoffLocation: true,
+        driver: {
+          select: {
+            id: true,
+            name: true,
+            image: true,
+          }
+        },
+        car: {
+          select: {
+            id: true,
+            make: true,
+            model: true,
+            year: true,
+            color: true,
+            licensePlate: true
+          }
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    }) as RideWithRelations[]
+
+    // If no coordinates provided, return all matching rides
+    if (!fromCoords) {
+      return NextResponse.json(rides)
+    }
+
+    // Filter rides based on pickup location distance
+    const filteredRides = rides.filter(ride => {
+      if (!ride.pickupLocation || !ride.dropoffLocation) {
+        console.log('Ride missing location data:', ride.id)
+        return false
+      }
+
+      // Calculate distance from user's pickup location to ride's pickup location
+      const pickupDistance = calculateDistanceSync(
+        fromCoords.latitude,
+        fromCoords.longitude,
+        ride.pickupLocation.latitude,
+        ride.pickupLocation.longitude
+      )
+      // Convert kilometers to miles
+      const pickupDistanceMiles = pickupDistance * 0.621371
+
+      // If destination coordinates are provided, also check dropoff distance
+      if (toCoords) {
+        const dropoffDistance = calculateDistanceSync(
+          toCoords.latitude,
+          toCoords.longitude,
+          ride.dropoffLocation.latitude,
+          ride.dropoffLocation.longitude
+        )
+        // Convert kilometers to miles
+        const dropoffDistanceMiles = dropoffDistance * 0.621371
+
+        // Return true only if both pickup and dropoff are within maxDistance
+        return pickupDistanceMiles <= maxDistance && dropoffDistanceMiles <= maxDistance
+      }
+
+      // If no destination coordinates, only check pickup distance
+      return pickupDistanceMiles <= maxDistance
+    })
 
     // Add distance information to each ride
     const ridesWithDistance = filteredRides.map(ride => ({

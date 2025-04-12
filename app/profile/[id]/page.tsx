@@ -46,6 +46,7 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [canReview, setCanReview] = useState(false);
 
   const { data: userData, error: queryError, isLoading, refetch } = useQuery({
     queryKey: ['user', resolvedParams.id],
@@ -59,6 +60,26 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
     },
     enabled: !!resolvedParams.id,
   });
+
+  // Check if users have ridden together
+  const { data: rideData } = useQuery({
+    queryKey: ['userRides', resolvedParams.id],
+    queryFn: async () => {
+      if (!session?.user?.id || !resolvedParams.id) return null;
+      
+      const response = await fetch(`/api/rides/check-connection?userId=${resolvedParams.id}`);
+      if (!response.ok) return null;
+      
+      return response.json();
+    },
+    enabled: !!session?.user?.id && !!resolvedParams.id && session.user.id !== resolvedParams.id,
+  });
+
+  useEffect(() => {
+    if (rideData) {
+      setCanReview(rideData.haveRiddenTogether);
+    }
+  }, [rideData]);
 
   useEffect(() => {
     if (userData) {
@@ -242,12 +263,20 @@ export default function UserProfile({ params }: { params: Promise<{ id: string }
             </div>
           </div>
           {session?.user?.email !== user.email && (
-            <Button
-              className="ml-auto"
-              onClick={() => setShowAddReview(true)}
-            >
-              Write a Review
-            </Button>
+            <>
+              {canReview ? (
+                <Button
+                  className="ml-auto"
+                  onClick={() => setShowAddReview(true)}
+                >
+                  Write a Review
+                </Button>
+              ) : (
+                <div className="ml-auto text-sm text-gray-500">
+                  You can only review users you have ridden with
+                </div>
+              )}
+            </>
           )}
         </CardHeader>
         <CardContent>

@@ -40,6 +40,50 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Reviewed user not found' }, { status: 404 });
     }
 
+    // Check if users have ridden together
+    const haveRiddenTogether = await prisma.booking.findFirst({
+      where: {
+        OR: [
+          // Reviewer was a passenger and reviewed user was the driver
+          {
+            userId: reviewer.id,
+            ride: {
+              driverId: validatedData.reviewedId,
+              status: 'COMPLETED'
+            }
+          },
+          // Reviewed user was a passenger and reviewer was the driver
+          {
+            userId: validatedData.reviewedId,
+            ride: {
+              driverId: reviewer.id,
+              status: 'COMPLETED'
+            }
+          },
+          // Both users were passengers on the same ride
+          {
+            userId: reviewer.id,
+            ride: {
+              bookings: {
+                some: {
+                  userId: validatedData.reviewedId,
+                  status: 'COMPLETED'
+                }
+              },
+              status: 'COMPLETED'
+            }
+          }
+        ]
+      }
+    });
+
+    if (!haveRiddenTogether) {
+      return NextResponse.json(
+        { error: 'You can only review users you have ridden with' },
+        { status: 403 }
+      );
+    }
+
     // Check if the reviewer has already reviewed this user
     const existingReview = await prisma.review.findFirst({
       where: {

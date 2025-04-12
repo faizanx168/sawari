@@ -1,18 +1,24 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { MapPin, Users, Loader2, Crosshair, Clock, Calendar, Navigation } from 'lucide-react';
-import { Ride } from '../types/ride';
-import AddressInput from '../components/AddressInput';
-import { calculateDistanceSync } from '../utils/distance';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Ride } from '@/app/types/ride';
+import { SearchFilters, PriceRange, RidePreferences, RecentSearch, SortOption, SortConfig } from '@/app/types/search';
+import { Label as UILabel } from '@/app/components/ui/label';
 import { toast } from 'sonner';
+import AddressInput from '../components/AddressInput';
+import { defaultPreferences } from '../utils/preferences';
+import { calculateDistanceSync } from '../utils/distance';
 import RideMap from '../components/RideMap';
+import { RideCardSkeleton } from '@/app/components/RideCardSkeleton';
+import { Calendar, Users, Navigation } from 'lucide-react';
+import { loadGoogleMaps } from '../utils/googleMaps';
 
-interface Location {
-  latitude: number;
-  longitude: number;
-  address: string;
+interface RideWithDistance extends Ride {
+  distance?: {
+    pickup: number;
+    dropoff: number | null;
+  };
 }
 
 interface DistanceMatrixResponse {
@@ -24,254 +30,400 @@ interface DistanceMatrixResponse {
   }[];
 }
 
-export default function FindRides() {
+interface QuickTimeFilter {
+  label: string;
+  getDate: () => Date;
+}
+
+const quickTimeFilters: QuickTimeFilter[] = [
+  { 
+    label: 'Today', 
+    getDate: () => new Date() 
+  },
+  { 
+    label: 'Tomorrow', 
+    getDate: () => {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      return tomorrow;
+    }
+  },
+  { 
+    label: 'This Week', 
+    getDate: () => {
+      const nextWeek = new Date();
+      nextWeek.setDate(nextWeek.getDate() + 7);
+      return nextWeek;
+    }
+  }
+];
+
+function FindRidesContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [gettingLocation, setGettingLocation] = useState(false);
-  const [searchFilters, setSearchFilters] = useState({
-    from: '',
-    to: '',
-    seats: 1,
-    maxDistance: 10,
-    fromLocation: null as Location | null,
-    toLocation: null as Location | null,
-    departureDate: null as Date | null,
-    departureTime: ''
+  const [sortConfig, setSortConfig] = useState<SortConfig>({
+    key: 'price',
+    order: 'asc'
   });
-  const [sortBy, setSortBy] = useState<'price' | 'distance' | 'departure'>('departure');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [selectedRideId, setSelectedRideId] = useState<string | null>(null);
+  const [priceRange, setPriceRange] = useState<PriceRange>({ min: 0, max: 1000 });
+  const [preferences, setPreferences] = useState<RidePreferences>(defaultPreferences);
+  const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
+  const [showRecentSearches, setShowRecentSearches] = useState(false);
+  const [searchFilters, setSearchFilters] = useState<SearchFilters>({
+    from: searchParams.get('from') || '',
+    to: searchParams.get('to') || '',
+    fromLocation: null,
+    toLocation: null,
+    departureDate: searchParams.get('date') ? new Date(searchParams.get('date')!) : null,
+    departureTime: searchParams.get('time') || '',
+    seats: parseInt(searchParams.get('seats') || '1'),
+    maxDistance: 50,
+    priceRange: {
+      min: 0,
+      max: 1000
+    },
+    preferences: {
+      smoking: false,
+      music: false,
+      pets: false,
+      luggage: false
+    },
+    radius: 50
+  });
   const [estimatedDuration, setEstimatedDuration] = useState<string>('');
   const [estimatedDistance, setEstimatedDistance] = useState<string>('');
-  const [selectedRoute, setSelectedRoute] = useState<{ origin: Location; destination: Location } | null>(null);
+  const [selectedRideIds, setSelectedRideIds] = useState<string[]>([]);
 
-  const fetchRides = async () => {
+  // Load recent searches on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('recentSearches');
+    if (saved) {
+      try {
+        setRecentSearches(JSON.parse(saved));
+      } catch (err) {
+        console.error('Error loading recent searches:', err);
+      }
+    }
+  }, []);
+
+  // Load preferences on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('ridePreferences');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setPreferences(parsed);
+        // Apply saved preferences to search filters
+        setSearchFilters(prev => ({
+          ...prev,
+          seats: parsed.defaultSeats,
+          maxDistance: parsed.maxDistance
+        }));
+      } catch (err) {
+        console.error('Error loading preferences:', err);
+      }
+    }
+  }, []);
+
+  // Save search after successful fetch
+  const saveSearch = () => {
+    if (!searchFilters.from && !searchFilters.to) return;
+    
+    const newSearch: RecentSearch = {
+      id: crypto.randomUUID(),
+      from: searchFilters.from,
+      to: searchFilters.to,
+      departureDate: searchFilters.departureDate || new Date(),
+      timestamp: new Date()
+    };
+    
+    setRecentSearches(prev => {
+      const filtered = prev.filter(s => s.from !== newSearch.from || s.to !== newSearch.to);
+      return [newSearch, ...filtered].slice(0, 5);
+    });
+    
+    localStorage.setItem('recentSearches', JSON.stringify([newSearch]));
+  };
+
+  const applyRecentSearch = (search: RecentSearch) => {
+    setSearchFilters(prev => ({
+      ...prev,
+      from: search.from,
+      to: search.to,
+      fromLocation: null,
+      toLocation: null
+    }));
+    setShowRecentSearches(false);
+  };
+
+  const applyQuickTimeFilter = (filter: QuickTimeFilter) => {
+    const date = filter.getDate();
+    setSearchFilters(prev => ({
+      ...prev,
+      departureDate: date
+    }));
+  };
+
+  const handleSearch = async () => {
+    if (!searchFilters.fromLocation && !searchFilters.toLocation) {
+      setError('Please select valid locations');
+      return;
+    }
+
     setLoading(true);
     setError(null);
+
     try {
-      const params = new URLSearchParams();
-      
-      if (searchFilters.from) params.append('from', searchFilters.from);
-      if (searchFilters.to) params.append('to', searchFilters.to);
-      if (searchFilters.seats > 1) params.append('seats', searchFilters.seats.toString());
-      if (searchFilters.maxDistance) params.append('maxDistance', searchFilters.maxDistance.toString());
-      if (searchFilters.departureDate) {
-        const dateStr = searchFilters.departureDate.toISOString().split('T')[0];
-        if (dateStr) {
-          params.append('date', dateStr);
-        }
-      }
-      if (searchFilters.departureTime) {
-        params.append('time', searchFilters.departureTime);
-      }
-      
-      if (searchFilters.fromLocation) {
-        params.append('fromLat', searchFilters.fromLocation.latitude.toString());
-        params.append('fromLng', searchFilters.fromLocation.longitude.toString());
-      }
-      
-      if (searchFilters.toLocation) {
-        params.append('toLat', searchFilters.toLocation.latitude.toString());
-        params.append('toLng', searchFilters.toLocation.longitude.toString());
-      }
+      // Format the date properly for the API
+      const formattedDate = searchFilters.departureDate 
+        ? searchFilters.departureDate.toISOString().split('T')[0] 
+        : null;
 
-      const response = await fetch(`/api/rides/search?${params}`);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Failed to fetch rides');
-      }
-
-      // Filter rides based on recurring pattern
-      const filteredRides = data.filter((ride: Ride) => {
-        if (!searchFilters.departureDate) return true;
-        
-        const dateStr = searchFilters.departureDate.toISOString().split('T')[0];
-        if (!dateStr) return true;
-        
-        const selectedDateTime = new Date(`${dateStr}T${searchFilters.departureTime}`);
-        
-        switch (ride.recurringPattern) {
-          case 'DAILY':
-            return true;
-          case 'WEEKLY': {
-            const dayOfWeek = selectedDateTime.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase();
-            return ride.recurringDays?.includes(dayOfWeek);
-          }
-          case 'MONTHLY': {
-            const dayOfMonth = selectedDateTime.getDate();
-            return ride.recurringDates?.includes(dayOfMonth);
-          }
-          default:
-            return true;
-        }
+      const response = await fetch('/api/rides/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: searchFilters.from,
+          to: searchFilters.to,
+          fromLat: searchFilters.fromLocation?.latitude,
+          fromLng: searchFilters.fromLocation?.longitude,
+          toLat: searchFilters.toLocation?.latitude,
+          toLng: searchFilters.toLocation?.longitude,
+          departureDate: formattedDate,
+          seats: searchFilters.seats,
+          maxDistance: searchFilters.maxDistance,
+        }),
       });
 
-      setRides(filteredRides);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to fetch rides');
+      }
+
+      const data = await response.json();
+      setRides(data);
+      saveSearch();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred while fetching rides');
-      setRides([]);
+      setError(err instanceof Error ? err.message : 'An error occurred');
+      toast.error('Failed to search rides');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSort = (field: 'price' | 'distance' | 'departure') => {
-    if (sortBy === field) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortBy(field);
-      setSortOrder('asc');
-    }
-  };
-
-  const sortRides = (ridesToSort: Ride[]) => {
-    return [...ridesToSort].sort((a, b) => {
-      if (sortBy === 'price') {
-        return sortOrder === 'asc' 
-          ? a.pricePerSeat - b.pricePerSeat 
-          : b.pricePerSeat - a.pricePerSeat;
-      } else if (sortBy === 'distance' && searchFilters.fromLocation) {
-        const distA = calculateDistanceSync(
-          searchFilters.fromLocation.latitude,
-          searchFilters.fromLocation.longitude,
-          a.pickupLocation.latitude,
-          a.pickupLocation.longitude
-        );
-        const distB = calculateDistanceSync(
-          searchFilters.fromLocation.latitude,
-          searchFilters.fromLocation.longitude,
-          b.pickupLocation.latitude,
-          b.pickupLocation.longitude
-        );
-        return sortOrder === 'asc' ? distA - distB : distB - distA;
-      } else if (sortBy === 'departure') {
-        const timeA = new Date(a.departureTime).getTime();
-        const timeB = new Date(b.departureTime).getTime();
-        return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
-      }
-      return 0;
-    });
-  };
-
-  const clearFilters = () => {
-    setSearchFilters({
-      from: '',
-      to: '',
-      seats: 1,
-      maxDistance: 10,
-      fromLocation: null,
-      toLocation: null,
-      departureDate: null,
-      departureTime: ''
-    });
-    setRides([]);
-    setError(null);
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchFilters.from && !searchFilters.to) {
-      setError('Please enter at least one location');
-      return;
-    }
-    fetchRides();
-  };
-
-  const getCurrentLocation = () => {
-    setGettingLocation(true);
-    if (!navigator.geolocation) {
-      toast.error('Geolocation is not supported by your browser');
-      setGettingLocation(false);
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        try {
-          const { latitude, longitude } = position.coords;
-          
-          // Use Google Maps Geocoding API to get the address
-          const response = await fetch(
-            `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}`
-          );
-          
-          const data = await response.json();
-          
-          if (data.status === 'OK' && data.results[0]) {
-            const address = data.results[0].formatted_address;
-            setSearchFilters(prev => ({
-              ...prev,
-              from: address,
-              fromLocation: { latitude, longitude, address }
-            }));
-          } else {
-            throw new Error('Failed to get address from coordinates');
-          }
-        } catch (error) {
-          toast.error('Failed to get your current location address');
-          console.error('Error getting location:', error);
-        } finally {
-          setGettingLocation(false);
-        }
-      },
-      (error) => {
-        toast.error('Failed to get your location. Please check your browser settings.');
-        console.error('Error getting location:', error);
-        setGettingLocation(false);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 5000,
-        maximumAge: 0
-      }
-    );
-  };
-
-  const handleViewRoute = (ride: Ride) => {
-    if (selectedRideId === ride.id && selectedRoute) {
-      setSelectedRoute(null);
-      setSelectedRideId(null);
-    } else {
-      setSelectedRoute({
-        origin: ride.pickupLocation,
-        destination: ride.dropoffLocation
-      });
-      setSelectedRideId(ride.id);
-    }
+  const handleSort = (key: SortOption) => {
+    setSortConfig(prev => ({
+      key,
+      order: prev.key === key && prev.order === 'asc' ? 'desc' : 'asc'
+    }));
   };
 
   const handleBookRide = (rideId: string) => {
     router.push(`/book-ride/${rideId}`);
   };
 
-  const sortedRides = sortRides(rides);
-
   useEffect(() => {
     if (searchFilters.fromLocation && searchFilters.toLocation) {
-      const service = new window.google.maps.DistanceMatrixService();
-      service.getDistanceMatrix(
-        {
-          origins: [{ lat: searchFilters.fromLocation.latitude, lng: searchFilters.fromLocation.longitude }],
-          destinations: [{ lat: searchFilters.toLocation.latitude, lng: searchFilters.toLocation.longitude }],
-          travelMode: window.google.maps.TravelMode.DRIVING,
-        },
-        (response: DistanceMatrixResponse | null, status: string) => {
-          if (status === 'OK' && response?.rows?.[0]?.elements?.[0]) {
-            const element = response.rows[0].elements[0];
-            const duration = element.duration?.text;
-            const distance = element.distance?.text;
-            if (duration && distance) {
-              setEstimatedDuration(duration);
-              setEstimatedDistance(distance);
+      const calculateDistance = async () => {
+        try {
+          await loadGoogleMaps();
+          
+          const service = new window.google.maps.DistanceMatrixService();
+          service.getDistanceMatrix(
+            {
+              origins: [{ 
+                lat: searchFilters.fromLocation?.latitude || 0, 
+                lng: searchFilters.fromLocation?.longitude || 0 
+              }],
+              destinations: [{ 
+                lat: searchFilters.toLocation?.latitude || 0, 
+                lng: searchFilters.toLocation?.longitude || 0 
+              }],
+              travelMode: window.google.maps.TravelMode.DRIVING,
+            },
+            (response: DistanceMatrixResponse | null, status: string) => {
+              if (status === 'OK' && response?.rows?.[0]?.elements?.[0]) {
+                const element = response.rows[0].elements[0];
+                const duration = element.duration?.text;
+                const distance = element.distance?.text;
+                if (duration && distance) {
+                  setEstimatedDuration(duration);
+                  setEstimatedDistance(distance);
+                }
+              }
             }
-          }
+          );
+        } catch (error) {
+          console.error('Error calculating distance:', error);
         }
-      );
+      };
+      
+      calculateDistance();
     }
   }, [searchFilters.fromLocation, searchFilters.toLocation]);
+
+  // Save preferences
+  const savePreferences = (newPreferences: RidePreferences) => {
+    setPreferences(newPreferences);
+    localStorage.setItem('ridePreferences', JSON.stringify(newPreferences));
+    // Apply to current search
+    setSearchFilters(prev => ({
+      ...prev,
+      seats: newPreferences.defaultSeats || prev.seats,
+      maxDistance: newPreferences.maxDistance || prev.maxDistance
+    }));
+  };
+
+  const toggleRideSelection = (rideId: string) => {
+    setSelectedRideIds(prev => 
+      prev.includes(rideId) 
+        ? prev.filter(id => id !== rideId)
+        : [...prev, rideId]
+    );
+  };
+
+  const compareRides = () => {
+    if (selectedRideIds.length < 2) {
+      setError('Please select at least 2 rides to compare');
+      return;
+    }
+    if (selectedRideIds.length > 4) {
+      setError('You can compare up to 4 rides at a time');
+      return;
+    }
+    router.push(`/compare-rides?rides=${selectedRideIds.join(',')}`);
+  };
+
+  // Filter rides based on search criteria
+  const filteredRides = rides.filter((ride: Ride) => {
+    // Check if user's pickup location is within ride's pickup radius
+    const isWithinPickupRadius = searchFilters.fromLocation && ride.pickupLocation ? 
+      calculateDistanceSync(
+        searchFilters.fromLocation.latitude,
+        searchFilters.fromLocation.longitude,
+        ride.pickupLocation.latitude,
+        ride.pickupLocation.longitude
+      ) * 0.621371 <= (ride.pickupRadius ?? searchFilters.maxDistance ?? 50) : true;
+    
+    // Check if user's dropoff location is within ride's dropoff radius
+    const isWithinDropoffRadius = searchFilters.toLocation && ride.dropoffLocation ? 
+      calculateDistanceSync(
+        searchFilters.toLocation.latitude,
+        searchFilters.toLocation.longitude,
+        ride.dropoffLocation.latitude,
+        ride.dropoffLocation.longitude
+      ) * 0.621371 <= (ride.dropoffRadius ?? searchFilters.maxDistance ?? 50) : true;
+    
+    // Check if the search date matches the ride's date
+    const matchesDate = !searchFilters.departureDate || (
+      new Date(ride.date).toDateString() === searchFilters.departureDate.toDateString()
+    );
+    
+    // Check if price is within range
+    const matchesPrice = (!priceRange.min || ride.pricePerSeat >= priceRange.min) &&
+      (!priceRange.max || ride.pricePerSeat <= priceRange.max);
+    
+    return matchesDate && matchesPrice && isWithinPickupRadius && isWithinDropoffRadius;
+  }).sort((a: Ride, b: Ride) => {
+    if (sortConfig.key === 'distance') {
+      const aDist = (a as RideWithDistance).distance?.pickup || 0;
+      const bDist = (b as RideWithDistance).distance?.pickup || 0;
+      return sortConfig.order === 'asc' ? aDist - bDist : bDist - aDist;
+    }
+    
+    if (sortConfig.key === 'price') {
+      return sortConfig.order === 'asc' 
+        ? a.pricePerSeat - b.pricePerSeat 
+        : b.pricePerSeat - a.pricePerSeat;
+    }
+    
+    if (sortConfig.key === 'time') {
+      const aTime = new Date(a.departureTime).getTime();
+      const bTime = new Date(b.departureTime).getTime();
+      return sortConfig.order === 'asc' ? aTime - bTime : bTime - aTime;
+    }
+    
+    return 0;
+  });
+
+  // Add type annotations to state update functions
+  const handleSearchFiltersUpdate = (prev: SearchFilters, value: string) => ({
+    ...prev,
+    seats: Math.max(1, parseInt(value) || 1)
+  });
+
+  const handleRecentSearchesUpdate = useCallback((prev: RecentSearch[]) => {
+    const newSearch: RecentSearch = {
+      id: crypto.randomUUID(),
+      from: searchFilters.from,
+      to: searchFilters.to,
+      departureDate: searchFilters.departureDate || new Date(),
+      timestamp: new Date()
+    };
+    return [newSearch, ...prev.filter(s => 
+      s.from !== newSearch.from || s.to !== newSearch.to
+    )].slice(0, 5);
+  }, [searchFilters.from, searchFilters.to, searchFilters.departureDate]);
+
+  // Update state setters to use the typed handlers
+  const updateSearchFilters = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchFilters(prev => handleSearchFiltersUpdate(prev, e.target.value));
+  };
+
+  const updateRecentSearches = useCallback(() => {
+    setRecentSearches(handleRecentSearchesUpdate);
+  }, [handleRecentSearchesUpdate]);
+
+  // Use the update functions in the component
+  useEffect(() => {
+    if (searchFilters.fromLocation && searchFilters.toLocation) {
+      updateRecentSearches();
+    }
+  }, [searchFilters.fromLocation, searchFilters.toLocation, updateRecentSearches]);
+
+  // Calculate distances for rides
+  useEffect(() => {
+    const calculateDistances = async () => {
+      if (!searchFilters.fromLocation || !searchFilters.toLocation || filteredRides.length === 0) {
+        return;
+      }
+
+      try {
+        await loadGoogleMaps();
+        
+        const service = new window.google.maps.DistanceMatrixService();
+        const origins = [searchFilters.fromLocation];
+        const destinations = filteredRides.map(ride => ride.pickupLocation);
+
+        const response = await service.getDistanceMatrix({
+          origins,
+          destinations,
+          travelMode: window.google.maps.TravelMode.DRIVING,
+          unitSystem: window.google.maps.UnitSystem.METRIC,
+        });
+
+        if (response && response.rows && response.rows.length > 0 && response.rows[0].elements && response.rows[0].elements.length > 0) {
+          const element = response.rows[0].elements[0];
+          const duration = element.duration?.text;
+          const distance = element.distance?.text;
+          if (duration && distance) {
+            setEstimatedDuration(duration);
+            setEstimatedDistance(distance);
+          }
+        }
+      } catch (err) {
+        console.error('Error calculating distances:', err);
+      }
+    };
+
+    calculateDistances();
+  }, [searchFilters.fromLocation, searchFilters.toLocation, filteredRides]);
 
   if (loading) {
     return (
@@ -285,107 +437,145 @@ export default function FindRides() {
   }
 
   return (
-    <div className="flex h-screen">
-      {/* Map Section */}
-      <div className="flex-1 relative">
-        <RideMap
-          rides={rides}
-          fromLocation={searchFilters.fromLocation}
-          toLocation={searchFilters.toLocation}
-          selectedRideId={selectedRideId}
-          selectedRoute={selectedRoute}
-          onRideSelect={setSelectedRideId}
-          maxDistance={searchFilters.maxDistance}
-        />
+    <div className="min-h-screen bg-gray-50">
+      <div className="container mx-auto px-4 py-6">
+        <h1 className="text-2xl font-bold mb-6">Find Rides</h1>
         
-        {/* Search Panel */}
-        <div className="absolute top-4 left-4 right-4 max-w-xl mx-auto bg-white rounded-lg shadow-lg">
-          <div className="p-4">
-            <div className="space-y-4">
-              {/* Pickup Location */}
-              <div className="flex items-center space-x-2">
-                <div className="flex-shrink-0">
-                  <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
-                    <MapPin className="h-5 w-5 text-white" />
-                  </div>
-                </div>
-                <div className="flex-1">
-                  <AddressInput
-                    value={searchFilters.from}
-                    onChange={(address, location) => setSearchFilters(prev => ({ 
-                      ...prev, 
+        {/* Search Form */}
+        <div className="bg-white rounded-lg shadow-sm p-4 mb-6">
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            handleSearch();
+          }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="relative">
+                <AddressInput
+                  value={searchFilters.from}
+                  onChange={(address, location) => {
+                    setSearchFilters(prev => ({
+                      ...prev,
                       from: address,
-                      fromLocation: location ? { ...location, address } : null 
-                    }))}
-                    placeholder="Enter pickup location"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={getCurrentLocation}
-                  disabled={gettingLocation}
-                  className="p-2 hover:bg-gray-100 rounded-full"
-                  title="Use current location"
-                >
-                  {gettingLocation ? (
-                    <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
-                  ) : (
-                    <Crosshair className="h-5 w-5 text-blue-500" />
-                  )}
-                </button>
+                      fromLocation: location
+                    }));
+                  }}
+                  placeholder="From"
+                  onFocus={() => setShowRecentSearches(true)}
+                />
               </div>
-
-              {/* Dropoff Location */}
-              <div className="flex items-center space-x-2">
-                <div className="flex-shrink-0">
-                  <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center">
-                    <MapPin className="h-5 w-5 text-white" />
-                  </div>
-                </div>
-                <div className="flex-1">
-                  <AddressInput
-                    value={searchFilters.to}
-                    onChange={(address, location) => setSearchFilters(prev => ({ 
-                      ...prev, 
+              <div className="relative">
+                <AddressInput
+                  value={searchFilters.to}
+                  onChange={(address, location) => {
+                    setSearchFilters(prev => ({
+                      ...prev,
                       to: address,
-                      toLocation: location ? { ...location, address } : null 
-                    }))}
-                    placeholder="Enter destination"
-                  />
-                </div>
+                      toLocation: location
+                    }));
+                  }}
+                  placeholder="To"
+                  onFocus={() => setShowRecentSearches(true)}
+                />
+                {showRecentSearches && recentSearches.length > 0 && (
+                  <div className="absolute z-10 w-full mt-1 bg-white rounded-md shadow-lg">
+                    <ul className="py-1">
+                      {recentSearches.map((search, index) => (
+                        <li
+                          key={index}
+                          className="px-4 py-2 hover:bg-gray-100 cursor-pointer text-sm"
+                          onClick={() => applyRecentSearch(search)}
+                        >
+                          <div className="font-medium">{search.to}</div>
+                          <div className="text-gray-500 text-xs">
+                            {new Date(search.timestamp).toLocaleDateString()}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
-
-              {/* Trip Details */}
-              <div className="flex items-center space-x-4 text-sm text-gray-600">
+              
+              {/* Seats and Distance */}
+              <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4 text-sm text-gray-600">
                 <div className="flex items-center space-x-2">
                   <Users className="h-5 w-5 text-gray-500" />
                   <input
                     type="number"
+                    min="1"
                     value={searchFilters.seats}
+                    onChange={updateSearchFilters}
+                    className="w-20 px-3 py-2 border rounded-md"
+                  />
+                  <span className="text-gray-600">seats</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    savePreferences({
+                      ...preferences,
+                      defaultSeats: searchFilters.seats
+                    });
+                  }}
+                  className="text-sm text-blue-600 hover:text-blue-800"
+                >
+                  Save as default
+                </button>
+              </div>
+              
+              {/* Distance Radius */}
+              <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+                <div className="flex items-center space-x-2">
+                  <Navigation className="h-5 w-5 text-gray-500" />
+                  <input
+                    type="number"
+                    min="0.1"
+                    max="10"
+                    step="0.1"
+                    value={searchFilters.maxDistance || 50}
                     onChange={(e) => setSearchFilters(prev => ({ 
                       ...prev, 
-                      seats: Math.max(1, parseInt(e.target.value) || 1) 
+                      maxDistance: Math.max(0.1, Math.min(10, parseFloat(e.target.value) || 1))
                     }))}
-                    min="1"
-                    className="w-20 p-2 border rounded"
-                    placeholder="Seats"
+                    className="w-20 px-3 py-2 border rounded-md"
                   />
+                  <span className="text-gray-600">miles radius</span>
                 </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    savePreferences({
+                      ...preferences,
+                      maxDistance: searchFilters.maxDistance
+                    });
+                  }}
+                  className="text-sm text-blue-600 hover:text-blue-800"
+                >
+                  Save as default
+                </button>
+              </div>
+              
+              {/* Date and Time */}
+              <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
                 <div className="flex items-center space-x-2">
                   <Calendar className="h-5 w-5 text-gray-500" />
                   <input
                     type="date"
                     value={searchFilters.departureDate ? searchFilters.departureDate.toISOString().split('T')[0] : ''}
-                    onChange={(e) => setSearchFilters(prev => ({
-                      ...prev,
-                      departureDate: e.target.value ? new Date(e.target.value) : null
-                    }))}
+                    onChange={(e) => {
+                      const dateValue = e.target.value;
+                      setSearchFilters(prev => ({
+                        ...prev,
+                        departureDate: dateValue ? new Date(dateValue) : null
+                      }));
+                    }}
                     min={new Date().toISOString().split('T')[0]}
-                    className="p-2 border rounded"
+                    className="p-2 border rounded w-full sm:w-auto"
                   />
                 </div>
                 <div className="flex items-center space-x-2">
-                  <Clock className="h-5 w-5 text-gray-500" />
+                  <Calendar className="h-5 w-5 text-gray-500" />
                   <input
                     type="time"
                     value={searchFilters.departureTime}
@@ -393,212 +583,249 @@ export default function FindRides() {
                       ...prev,
                       departureTime: e.target.value
                     }))}
-                    className="p-2 border rounded"
+                    className="p-2 border rounded w-full sm:w-auto"
                   />
                 </div>
               </div>
-
-              {/* Distance Filter */}
-              {searchFilters.fromLocation && (
-                <div className="bg-gray-50 p-3 rounded-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center">
-                      <Navigation className="h-5 w-5 text-gray-500 mr-2" />
-                      <span className="text-sm font-medium text-gray-700">Search Radius</span>
-                    </div>
-                    <span className="text-sm text-gray-600">{searchFilters.maxDistance} miles</span>
-                  </div>
+              
+              {/* Quick Time Filters */}
+              <div className="flex flex-wrap gap-2">
+                {quickTimeFilters.map((filter) => (
+                  <button
+                    key={filter.label}
+                    type="button"
+                    onClick={() => applyQuickTimeFilter(filter)}
+                    className={`px-3 py-1 rounded-full text-sm ${
+                      searchFilters.departureDate?.toDateString() === filter.getDate().toDateString()
+                        ? 'bg-blue-100 text-blue-700'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+              
+              {/* Price Range */}
+              <div className="space-y-2">
+                <UILabel className="block text-sm font-medium text-gray-700">
+                  Price Range
+                </UILabel>
+                <div className="flex items-center space-x-4">
                   <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    step="1"
-                    value={searchFilters.maxDistance}
-                    onChange={(e) => setSearchFilters(prev => ({ 
-                      ...prev, 
-                      maxDistance: parseInt(e.target.value) 
+                    type="number"
+                    min="0"
+                    max={priceRange.max}
+                    value={priceRange.min}
+                    onChange={(e) => setPriceRange(prev => ({
+                      ...prev,
+                      min: Math.max(0, parseInt(e.target.value) || 0)
                     }))}
-                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                    className="w-24 px-3 py-2 border rounded-md"
+                    placeholder="Min"
                   />
-                  <div className="flex justify-between text-xs text-gray-500 mt-1">
-                    <span>1 mile</span>
-                    <span>10 miles</span>
-                  </div>
+                  <span className="text-gray-500">to</span>
+                  <input
+                    type="number"
+                    min={priceRange.min}
+                    value={priceRange.max}
+                    onChange={(e) => setPriceRange(prev => ({
+                      ...prev, 
+                      max: Math.max(priceRange.min, parseInt(e.target.value) || 1000)
+                    }))}
+                    className="w-24 px-3 py-2 border rounded-md"
+                    placeholder="Max"
+                  />
                 </div>
-              )}
-
-              {/* Route Info */}
-              {estimatedDuration && estimatedDistance && (
-                <div className="flex items-center justify-between text-sm text-gray-600 bg-gray-50 p-2 rounded">
-                  <div className="flex items-center">
-                    <Clock className="h-4 w-4 mr-1" />
-                    <span>{estimatedDuration}</span>
-                  </div>
-                  <div className="flex items-center">
-                    <Navigation className="h-4 w-4 mr-1" />
-                    <span>{estimatedDistance}</span>
-                  </div>
+              </div>
+              
+              {/* Estimated Duration and Distance */}
+              <div className="flex items-center justify-between text-sm text-gray-600 bg-gray-50 p-2 rounded">
+                <div className="flex items-center">
+                  <Calendar className="h-4 w-4 mr-1" />
+                  <span>{estimatedDuration}</span>
                 </div>
-              )}
-
+                <div className="flex items-center">
+                  <Navigation className="h-4 w-4 mr-1" />
+                  <span>{estimatedDistance}</span>
+                </div>
+              </div>
+              
               {/* Search Button */}
-              <button
-                onClick={handleSubmit}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Find Available Rides
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Results Panel */}
-      <div className="w-96 bg-white shadow-lg overflow-y-auto">
-        <div className="p-4 border-b">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Available Rides</h2>
-            <div className="flex items-center space-x-2">
-              <select
-                value={sortBy}
-                onChange={(e) => handleSort(e.target.value as 'price' | 'distance' | 'departure')}
-                className="text-sm border rounded-md p-1"
-              >
-                <option value="departure">Departure Time</option>
-                <option value="price">Price</option>
-                {searchFilters.fromLocation && <option value="distance">Distance</option>}
-              </select>
-              <button
-                onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-                className="p-1 hover:bg-gray-100 rounded"
-              >
-                {sortOrder === 'asc' ? '↑' : '↓'}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="p-4">
-          {error ? (
-            <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg" role="alert">
-              <span className="block sm:inline">{error}</span>
-            </div>
-          ) : rides.length === 0 ? (
-            <div className="text-center py-12">
-              <p className="text-gray-500">No rides found matching your criteria.</p>
-              <button
-                onClick={clearFilters}
-                className="mt-4 text-blue-600 hover:text-blue-800"
-              >
-                Clear all filters
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {sortedRides.map((ride) => (
-                <div
-                  key={ride.id}
-                  className={`p-4 border rounded-lg cursor-pointer hover:bg-gray-50 transition-colors ${
-                    selectedRideId === ride.id ? 'border-blue-500 bg-blue-50' : ''
-                  }`}
-                  onClick={() => setSelectedRideId(ride.id)}
+              <div className="md:col-span-2">
+                <button
+                  type="submit"
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
                 >
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h3 className="font-medium">${ride.pricePerSeat}</h3>
-                      <p className="text-sm text-gray-500">per seat</p>
-                    </div>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleViewRoute(ride);
-                        }}
-                        className="px-3 py-2 text-sm font-medium text-blue-600 border border-blue-600 rounded-md hover:bg-blue-50"
-                      >
-                        {selectedRideId === ride.id && selectedRoute ? 'Hide Route' : 'View Route'}
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleBookRide(ride.id);
-                        }}
-                        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-                      >
-                        Book Now
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center text-gray-600">
-                        <Users className="h-4 w-4 mr-2" />
-                        <span>{ride.seatsAvailable} seats available</span>
-                      </div>
-                      <div className="flex items-center text-gray-600">
-                        <Clock className="h-4 w-4 mr-2" />
-                        <span>{new Date(ride.departureTime).toLocaleTimeString()}</span>
-                      </div>
-                    </div>
-
-                    {/* Show recurring pattern info */}
-                    <div className="text-sm text-gray-600">
-                      <div className="flex items-center">
-                        <Calendar className="h-4 w-4 mr-2" />
-                        <span>
-                          {ride.recurringPattern === 'DAILY' && 'Daily'}
-                          {ride.recurringPattern === 'WEEKLY' && 
-                            `Weekly on ${ride.recurringDays?.join(', ')}`}
-                          {ride.recurringPattern === 'MONTHLY' && 
-                            `Monthly on ${ride.recurringDates?.join(', ')}`}
-                        </span>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        {ride.startDate && `From ${new Date(ride.startDate).toLocaleDateString()}`}
-                        {ride.endDate && ` to ${new Date(ride.endDate).toLocaleDateString()}`}
-                      </div>
-                    </div>
-
-                    {searchFilters.fromLocation && (
-                      <div className="flex items-center text-sm text-gray-600">
-                        <MapPin className="h-4 w-4 mr-2" />
-                        <span>
-                          {(calculateDistanceSync(
-                            searchFilters.fromLocation.latitude,
-                            searchFilters.fromLocation.longitude,
-                            ride.pickupLocation.latitude,
-                            ride.pickupLocation.longitude
-                          ) * 0.621371).toFixed(1)} miles away
-                        </span>
-                      </div>
-                    )}
-
-                    <div className="pt-2 border-t mt-2">
-                      <div className="flex items-center mb-1">
-                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center mr-2">
-                          <MapPin className="h-4 w-4 text-white" />
-                        </div>
-                        <span className="text-sm text-gray-600">
-                          {ride.pickupLocation.address}
-                        </span>
-                      </div>
-                      <div className="flex items-center">
-                        <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center mr-2">
-                          <MapPin className="h-4 w-4 text-white" />
-                        </div>
-                        <span className="text-sm text-gray-600">
-                          {ride.dropoffLocation.address}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                  Find Available Rides
+                </button>
+              </div>
             </div>
-          )}
+          </form>
+        </div>
+        
+        {/* Map and Results Section - Responsive Layout */}
+        <div className="flex flex-col lg:flex-row h-[calc(100vh-16rem)] lg:h-[calc(100vh-12rem)]">
+          {/* Map Section */}
+          <div className="w-full lg:w-2/3 h-[300px] lg:h-full relative mb-4 lg:mb-0">
+            <RideMap
+              rides={rides}
+              fromLocation={searchFilters.fromLocation}
+              toLocation={searchFilters.toLocation}
+              selectedRideId={selectedRideId}
+              selectedRoute={null}
+              onRideSelect={setSelectedRideId}
+              maxDistance={searchFilters.maxDistance || 50}
+            />
+          </div>
+
+          {/* Results Section */}
+          <div className="w-full lg:w-1/3 bg-white border rounded-lg overflow-hidden">
+            <div className="p-4 border-b">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4">
+                <h2 className="text-lg font-semibold mb-2 sm:mb-0">
+                  {filteredRides.length} {filteredRides.length === 1 ? 'Ride' : 'Rides'} Found
+                </h2>
+                <div className="flex items-center space-x-2">
+                  <select
+                    value={sortConfig.key}
+                    onChange={(e) => handleSort(e.target.value as SortOption)}
+                    className="text-sm border rounded px-2 py-1"
+                  >
+                    <option value="time">Departure Time</option>
+                    <option value="price">Price</option>
+                    <option value="distance">Distance</option>
+                  </select>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSortConfig(prev => ({
+                        ...prev,
+                        order: prev.order === 'asc' ? 'desc' : 'asc'
+                      }));
+                    }}
+                    className="p-1 hover:bg-gray-100 rounded"
+                  >
+                    {sortConfig.order === 'asc' ? '↑' : '↓'}
+                  </button>
+                </div>
+              </div>
+              {selectedRideIds.length > 0 && (
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-sm text-gray-600">
+                    {selectedRideIds.length} ride{selectedRideIds.length !== 1 ? 's' : ''} selected
+                  </span>
+                  <button
+                    onClick={compareRides}
+                    disabled={selectedRideIds.length < 2 || selectedRideIds.length > 4}
+                    className={`px-4 py-2 rounded-md text-sm font-medium ${
+                      selectedRideIds.length >= 2 && selectedRideIds.length <= 4
+                        ? 'bg-blue-600 text-white hover:bg-blue-700'
+                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    Compare Rides
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="overflow-y-auto h-[calc(100vh-24rem)] lg:h-[calc(100vh-16rem)]">
+              {loading ? (
+                <div className="space-y-4 p-4">
+                  {[1, 2, 3].map((i) => (
+                    <RideCardSkeleton key={i} />
+                  ))}
+                </div>
+              ) : error ? (
+                <div className="p-4 text-red-600">{error}</div>
+              ) : filteredRides.length === 0 ? (
+                <div className="p-4 text-gray-500 text-center">
+                  No rides found. Try adjusting your search criteria.
+                </div>
+              ) : (
+                <div className="space-y-4 p-4">
+                  {filteredRides.map((ride) => (
+                    <div
+                      key={ride.id}
+                      className={`bg-white rounded-lg shadow-sm p-4 cursor-pointer transition-colors ${
+                        selectedRideId === ride.id ? 'ring-2 ring-blue-500' : 'hover:bg-gray-50'
+                      }`}
+                      onClick={() => setSelectedRideId(ride.id)}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedRideIds.includes(ride.id)}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                toggleRideSelection(ride.id);
+                              }}
+                              className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                            />
+                            <h3 className="text-lg font-medium">
+                              {ride.pickupLocation.address} → {ride.dropoffLocation.address}
+                            </h3>
+                          </div>
+                          <div className="mt-2 text-sm text-gray-600">
+                            <div className="flex items-center">
+                              <Calendar className="h-4 w-4 mr-2" />
+                              <span>
+                                {new Date(ride.date).toLocaleDateString()} at {ride.departureTime}
+                              </span>
+                            </div>
+                            <div className="flex items-center mt-1">
+                              <Users className="h-4 w-4 mr-2" />
+                              <span>{ride.seatsAvailable} seats available</span>
+                            </div>
+                            <div className="flex items-center mt-1">
+                              <span className="font-medium">${ride.pricePerSeat}</span>
+                              <span className="text-gray-500 ml-1">per seat</span>
+                            </div>
+                            {ride.pickupRadius && (
+                              <div className="flex items-center mt-1">
+                                <Navigation className="h-4 w-4 mr-2" />
+                                <span>Pickup radius: {ride.pickupRadius} miles</span>
+                              </div>
+                            )}
+                            {ride.dropoffRadius && (
+                              <div className="flex items-center mt-1">
+                                <Navigation className="h-4 w-4 mr-2" />
+                                <span>Dropoff radius: {ride.dropoffRadius} miles</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleBookRide(ride.id);
+                          }}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                        >
+                          Book Now
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function FindRides() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <FindRidesContent />
+    </Suspense>
   );
 } 
